@@ -1317,13 +1317,32 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             /*.shares_model =*/ !has_draft, // an MTP context runs on the weights of the main model
         };
 
+
+        int n_expert_hot_s = params.expert_hot_s;
+        int * p_expert_hot_s = params.expert_hot_s == -1 ? &n_expert_hot_s : nullptr;
         common_fit_params(params.model.path.c_str(), &mparams, &cparams,
             params.tensor_split,
             params.tensor_buft_overrides.data(),
             params.fit_params_target.data(),
             params.fit_params_min_ctx,
             has_draft || spec_mtp ? &extra : nullptr,
-            params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
+            params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR,
+            p_expert_hot_s);
+        if (params.expert_hot_s == -1) {
+            // -1 = autofit slots from what the fit leaves on GPU; send all experts
+            // to CPU so the hot store copy reads host pointers (<=> -cmoe).
+            params.expert_hot_s = n_expert_hot_s > 0 ? n_expert_hot_s : 0;
+            cparams.expert_hot_s = params.expert_hot_s;
+            if (params.expert_hot_s > 0) {
+                for (auto & o : params.tensor_buft_overrides) {
+                    if (o.pattern == nullptr) {
+                        o.buft    = ggml_backend_cpu_buffer_type();
+                        o.pattern = LLM_FFN_EXPS_REGEX;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
@@ -1750,6 +1769,13 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
+
+    cparams.expert_heat_decay      = params.expert_heat_decay;
+    cparams.expert_heat_log_period = params.expert_heat_log_period;
+    cparams.expert_hot_s           = params.expert_hot_s;
+    cparams.expert_hyst            = params.expert_hyst;
+    cparams.expert_dwell           = params.expert_dwell;
+    cparams.expert_cache_force      = params.expert_cache_force;
 
     return cparams;
 }
