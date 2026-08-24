@@ -7,7 +7,38 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 
+#include <cstdlib>
 #include <regex>
+
+#ifdef __linux__
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
+// Exclusive-tier mode (LLAMA_EHS_EXCLUSIVE=1): once an expert slice is copied
+// into the GPU hot store, drop its host pages with MADV_DONTNEED. The cold
+// mul_mat_id path never reads GPU-resident experts (they are remapped to the
+// dummy and masked), so the pages are dead weight in RAM; dropping them makes
+// the placement exclusive and shrinks host residency by the hot-store size.
+// REQUIRES file-backed mmap weights (the default): on a demote the next CPU
+// read refaults the pages from disk. NEVER enable together with --no-mmap --
+// MADV_DONTNEED on anonymous memory zero-fills instead of refaulting.
+static void ehs_drop_host_pages(const void * ptr, size_t len) {
+#ifdef __linux__
+    static const bool enabled = getenv("LLAMA_EHS_EXCLUSIVE") != nullptr;
+    if (!enabled || ptr == nullptr || len == 0) {
+        return;
+    }
+    const size_t page = (size_t) sysconf(_SC_PAGESIZE);
+    uintptr_t beg = ((uintptr_t) ptr + page - 1) & ~(page - 1); // round in
+    uintptr_t end = ((uintptr_t) ptr + len)     & ~(page - 1);
+    if (end > beg) {
+        madvise((void *) beg, end - beg, MADV_DONTNEED);
+    }
+#else
+    (void) ptr; (void) len;
+#endif
+}
 
 // matches the weight tensor of an expert tensor, e.g.:
 //   blk.0.ffn_gate_exps.weight
@@ -163,6 +194,7 @@ void llama_expert_hotstore::copy_top_s(const llama_expert_heatmap & heatmap) {
                     continue;
                 }
                 ggml_backend_tensor_set(e->dst, src + (size_t) ex * slot, (size_t) p * slot, slot);
+                ehs_drop_host_pages(src + (size_t) ex * slot, slot);
             }
         }
     }
@@ -190,6 +222,7 @@ void llama_expert_hotstore::plant_static() {
             if (!src) continue;
             for (int p = 0; p < hot_s && p < n_experts; p++) {
                 ggml_backend_tensor_set(e->dst, src + (size_t) p * slot, (size_t) p * slot, slot);
+                ehs_drop_host_pages(src + (size_t) p * slot, slot);
             }
         }
     }
@@ -277,6 +310,7 @@ void llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
                     continue;
                 }
                 ggml_backend_tensor_set(ent->dst, src + (size_t) e_cold * slot, (size_t) p * slot, slot);
+                ehs_drop_host_pages(src + (size_t) e_cold * slot, slot);
             }
             ste[p] = e_cold;
             dc[p]  = -elapsed; // fresh dwell: aging below brings it to 0
