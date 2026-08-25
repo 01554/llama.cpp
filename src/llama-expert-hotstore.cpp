@@ -23,17 +23,83 @@
 // REQUIRES file-backed mmap weights (the default): on a demote the next CPU
 // read refaults the pages from disk. NEVER enable together with --no-mmap --
 // MADV_DONTNEED on anonymous memory zero-fills instead of refaulting.
+// LLAMA_EHS_EXCLUSIVE: 0=off, 1=madvise-drop (demote refaults from DISK - lazy),
+// 2=exclusive banks (promote frees host range via anonymous remap; demote restores
+//   bytes over PCIe with a D2H copy - steady state touches no disk).
+static int ehs_exclusive_mode() {
+#ifdef __linux__
+    static const int mode = [] {
+        const char * v = getenv("LLAMA_EHS_EXCLUSIVE");
+        return v ? atoi(v) : 0;
+    }();
+    return mode;
+#else
+    return 0;
+#endif
+}
+
+// global swap-rate limit: total swaps may not exceed K * tokens processed
+// (K = LLAMA_EHS_SWAPS_PER_TOK, default 2.0). One swap moves ~2x slot bytes
+// (H2D promote + D2H demote), so K directly prices migration bandwidth per
+// token; K=1 on V4-Flash is ~27 MB/token ~ 1 ms of PCIe.
+static double ehs_swaps_per_tok() {
+    static const double k = [] {
+        const char * v = getenv("LLAMA_EHS_SWAPS_PER_TOK");
+        return v ? atof(v) : 2.0;
+    }();
+    return k;
+}
+
+static size_t g_ehs_promoted_bytes = 0;
+static size_t g_ehs_demoted_bytes  = 0;
+static int    g_ehs_swaps          = 0;
+
+// mode 2: replace the expert slice's file-backed pages with empty anonymous
+// pages (inward page-aligned). Frees the host memory; a later D2H demote
+// writes real bytes back into them without ever touching the disk.
+static void ehs_remap_anon(const void * ptr, size_t len) {
+#ifdef __linux__
+    const size_t page = (size_t) sysconf(_SC_PAGESIZE);
+    uintptr_t beg = ((uintptr_t) ptr + page - 1) & ~(page - 1);
+    uintptr_t end = ((uintptr_t) ptr + len)     & ~(page - 1);
+    if (end > beg) {
+        mmap((void *) beg, end - beg, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    }
+#else
+    (void) ptr; (void) len;
+#endif
+}
+
+// promote-side host release, dispatched by mode
+static void ehs_release_host(const void * ptr, size_t len) {
+    const int mode = ehs_exclusive_mode();
+    if (mode == 2) {
+        ehs_remap_anon(ptr, len);
+        g_ehs_promoted_bytes += len;
+        return;
+    }
+    // mode 1 falls through to the madvise drop below
+}
+
 static void ehs_drop_host_pages(const void * ptr, size_t len) {
 #ifdef __linux__
-    static const bool enabled = getenv("LLAMA_EHS_EXCLUSIVE") != nullptr;
-    if (!enabled || ptr == nullptr || len == 0) {
+    if (ehs_exclusive_mode() != 1 || ptr == nullptr || len == 0) {
         return;
     }
     const size_t page = (size_t) sysconf(_SC_PAGESIZE);
     uintptr_t beg = ((uintptr_t) ptr + page - 1) & ~(page - 1); // round in
     uintptr_t end = ((uintptr_t) ptr + len)     & ~(page - 1);
     if (end > beg) {
-        madvise((void *) beg, end - beg, MADV_DONTNEED);
+        static size_t dropped_total = 0;
+        static int    calls         = 0;
+        if (madvise((void *) beg, end - beg, MADV_DONTNEED) == 0) {
+            dropped_total += end - beg;
+        }
+        if (++calls % 1000 == 0) {
+            LLAMA_LOG("EHS_EXCLUSIVE: dropped %.1f GiB across %d slices\n",
+                      dropped_total / (1024.0*1024.0*1024.0), calls);
+        }
     }
 #else
     (void) ptr; (void) len;
@@ -195,6 +261,7 @@ void llama_expert_hotstore::copy_top_s(const llama_expert_heatmap & heatmap) {
                 }
                 ggml_backend_tensor_set(e->dst, src + (size_t) ex * slot, (size_t) p * slot, slot);
                 ehs_drop_host_pages(src + (size_t) ex * slot, slot);
+                ehs_release_host(src + (size_t) ex * slot, slot);
             }
         }
     }
@@ -223,6 +290,7 @@ void llama_expert_hotstore::plant_static() {
             for (int p = 0; p < hot_s && p < n_experts; p++) {
                 ggml_backend_tensor_set(e->dst, src + (size_t) p * slot, (size_t) p * slot, slot);
                 ehs_drop_host_pages(src + (size_t) p * slot, slot);
+                ehs_release_host(src + (size_t) p * slot, slot);
             }
         }
     }
@@ -299,9 +367,39 @@ void llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
             if (e_cold < 0 || e_cold >= n_experts || resident_set[e_cold]) {
                 continue;
             }
+            if ((double) g_ehs_swaps >= ehs_swaps_per_tok() * (double) heatmap.tokens_total) {
+                break; // global churn rate cap: swaps <= K * tokens
+            }
             const int p = find_slot(e_cold);
             if (p < 0) {
                 break; // no slot free or displaceable under the gate
+            }
+            const int e_old = ste[p];
+            if (e_old >= 0 && ehs_exclusive_mode() == 2) {
+                // demote over PCIe: write the outgoing expert back into its
+                // (anonymous) host range before the slot is overwritten
+                for (entry * ent : entries_by_layer[il]) {
+                    const size_t slot_b = ggml_nbytes(ent->src) / (size_t) ent->src->ne[2];
+                    char * hst = ent->src->data ? (char *) ggml_get_data(ent->src) : nullptr;
+                    if (hst == nullptr) {
+                        continue;
+                    }
+                    // write ONLY the page-aligned interior: it is the part that was
+                    // remapped anonymous (writable) at promotion. The boundary bytes
+                    // are untouched read-only file pages and already hold the correct
+                    // (immutable) weights - writing them would SIGSEGV.
+#ifdef __linux__
+                    const size_t page = (size_t) sysconf(_SC_PAGESIZE);
+                    char * base = hst + (size_t) e_old * slot_b;
+                    uintptr_t beg = ((uintptr_t) base + page - 1) & ~(page - 1);
+                    uintptr_t end = ((uintptr_t) base + slot_b)   & ~(page - 1);
+                    if (end > beg) {
+                        ggml_backend_tensor_get(ent->dst, (void *) beg,
+                            (size_t) p * slot_b + (size_t) (beg - (uintptr_t) base), end - beg);
+                        g_ehs_demoted_bytes += end - beg;
+                    }
+#endif
+                }
             }
             for (entry * ent : entries_by_layer[il]) {
                 const size_t slot = ggml_nbytes(ent->src) / (size_t) ent->src->ne[2];
@@ -311,6 +409,13 @@ void llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
                 }
                 ggml_backend_tensor_set(ent->dst, src + (size_t) e_cold * slot, (size_t) p * slot, slot);
                 ehs_drop_host_pages(src + (size_t) e_cold * slot, slot);
+                ehs_release_host(src + (size_t) e_cold * slot, slot);
+            }
+            if (++g_ehs_swaps % 500 == 0) {
+                LLAMA_LOG("EHS_SWAPS: %d total, promoted %.1f GiB, demoted(D2H) %.1f GiB\n",
+                          g_ehs_swaps,
+                          g_ehs_promoted_bytes / (1024.0*1024.0*1024.0),
+                          g_ehs_demoted_bytes  / (1024.0*1024.0*1024.0));
             }
             ste[p] = e_cold;
             dc[p]  = -elapsed; // fresh dwell: aging below brings it to 0

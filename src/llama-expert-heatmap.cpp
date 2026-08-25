@@ -8,6 +8,8 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cmath>
+#include <cstdlib>
+#include <vector>
 
 llama_expert_heatmap::llama_expert_heatmap(
         int n_layers, int n_experts,
@@ -19,6 +21,47 @@ llama_expert_heatmap::llama_expert_heatmap(
     log_period(log_period),
     tokens_total(0),
     heat(n_layers * n_experts, 0.0f) {
+    // Optional hotness prior: LLAMA_EHS_HEAT_PRIOR=<csv with header layer,expert,count>
+    // (the routing-stats tool emits this format). Loaded as ~LLAMA_EHS_PRIOR_TOKENS
+    // (default 500) tokens worth of evidence per layer, so live routing can still
+    // overrule a stale prior within a few hundred tokens.
+    const char * prior_path = getenv("LLAMA_EHS_HEAT_PRIOR");
+    if (prior_path != nullptr) {
+        FILE * f = fopen(prior_path, "r");
+        if (f == nullptr) {
+            LLAMA_LOG("EHS_PRIOR: cannot open %s\n", prior_path);
+        } else {
+            const char * w = getenv("LLAMA_EHS_PRIOR_TOKENS");
+            const double prior_tokens = w ? atof(w) : 500.0;
+            std::vector<double> raw(n_layers * n_experts, 0.0);
+            std::vector<double> layer_sum(n_layers, 0.0);
+            char line[256];
+            if (fgets(line, sizeof(line), f)) {} // header
+            int il, e; long long c;
+            while (fgets(line, sizeof(line), f)) {
+                if (sscanf(line, "%d,%d,%lld", &il, &e, &c) == 3 &&
+                    il >= 0 && il < n_layers && e >= 0 && e < n_experts) {
+                    raw[il * n_experts + e] = (double) c;
+                    layer_sum[il] += (double) c;
+                }
+            }
+            fclose(f);
+            int loaded_layers = 0;
+            for (int l = 0; l < n_layers; l++) {
+                if (layer_sum[l] <= 0.0) {
+                    continue;
+                }
+                loaded_layers++;
+                // scale layer to prior_tokens * (selections per token in that layer)
+                const double target = prior_tokens * (layer_sum[l] > 0 ? 1.0 : 0.0);
+                for (int x = 0; x < n_experts; x++) {
+                    heat[l * n_experts + x] = (float) (raw[l * n_experts + x] / layer_sum[l] * target * 6.0);
+                }
+            }
+            LLAMA_LOG("EHS_PRIOR: loaded %s (%d layers, ~%.0f tokens of evidence)\n",
+                      prior_path, loaded_layers, prior_tokens);
+        }
+    }
 }
 
 void llama_expert_heatmap::update(int layer_idx, const int32_t * expert_ids, int n_expert_used, int n_tokens) {
