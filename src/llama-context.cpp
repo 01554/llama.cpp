@@ -1431,7 +1431,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
-    if (expert_heatmap && (ubatch.n_tokens == 1 || !expert_hotstore || !expert_hotstore->is_filled)) {
+    if (expert_heatmap && (ubatch.n_tokens <= 8 || !expert_hotstore || !expert_hotstore->is_filled)) {
         synchronize();
         expert_heatmap->update_from_graph(res->moe_sel_experts);
     }
@@ -1440,7 +1440,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             expert_hotstore->copy_top_s(*expert_heatmap);
         } else {
             expert_hotstore->maybe_resync(*expert_heatmap, ubatch.n_tokens > 1);
-            if (ubatch.n_tokens == 1 && getenv("LLAMA_EXPERT_HITRATE")) {
+            if (ubatch.n_tokens <= 8 && getenv("LLAMA_EXPERT_HITRATE")) {
                 expert_hotstore->log_hit_rate(res->moe_sel_experts);
             }
         }

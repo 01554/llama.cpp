@@ -91,10 +91,17 @@ void llama_expert_heatmap::update_from_graph(const std::vector<std::pair<int, gg
             continue;
         }
 
-        std::vector<int32_t> expert_ids(tensor->ne[0] * n_tokens);
-        ggml_backend_tensor_get(tensor, expert_ids.data(), 0, expert_ids.size() * sizeof(int32_t));
+        // ffn_moe_topk is a NON-CONTIGUOUS view (k rows selected out of the full
+        // argsort, nb[1] strides over all n_expert entries). A linear read would
+        // capture argsort permutation prefixes - near-uniform noise - instead of
+        // the routed expert ids. Copy row by row honoring nb[1].
+        const int64_t k = tensor->ne[0];
+        std::vector<int32_t> expert_ids(k * n_tokens);
+        for (int64_t j = 0; j < n_tokens; j++) {
+            ggml_backend_tensor_get(tensor, expert_ids.data() + j * k, j * tensor->nb[1], k * sizeof(int32_t));
+        }
 
-        update(il, expert_ids.data(), tensor->ne[0], n_tokens);
+        update(il, expert_ids.data(), k, n_tokens);
     }
 
     tokens_total += n_tokens;

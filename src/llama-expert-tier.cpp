@@ -78,6 +78,10 @@ ggml_tensor * llama_expert_tier_build(ggml_context * ctx,
                                       ggml_tensor * w_s) {
     // BUG-3E3: CUDA MMQ mul_mat_id compaction assumes distinct expert ids per token;
     // our sentinel duplicates OOB there. Decode (n_tokens==1) is safe via mmvq.
+    // BUG-3E3 confirmed empirically even for small batches (draft acceptance
+    // collapses 93% -> 38% when this gate is relaxed to <= 8): the batched
+    // mul_mat_id paths mis-handle our duplicated sentinel ids. A correct batch
+    // path needs lane-distinct sentinel slots - until then, single-token only.
     if (cur->ne[2] > 1) return nullptr;
 
     tier_entry ent;

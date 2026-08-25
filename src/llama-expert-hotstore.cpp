@@ -8,6 +8,7 @@
 #include "ggml-backend.h"
 
 #include <cstdlib>
+#include <algorithm>
 #include <regex>
 
 #ifdef __linux__
@@ -240,9 +241,23 @@ void llama_expert_hotstore::copy_top_s(const llama_expert_heatmap & heatmap) {
     }
 
     for (int il = 0; il < n_layers; il++) {
-        const std::vector<int> top = heatmap.get_top_s(il, hot_s);
+        std::vector<int> top = heatmap.get_top_s(il, hot_s);
         auto & ste = slot_to_expert[il];
         auto & dc  = dwell_count[il];
+        if (ehs_exclusive_mode() == 2) {
+            // pin expert 0 (the cold path dummy target) into the hot set: its host
+            // range then stays untouched-anonymous = the kernel zero page, so the
+            // per-token dummy GEMV reads cost no memory bandwidth at all.
+            auto it = std::find(top.begin(), top.end(), 0);
+            if (it != top.end()) {
+                std::iter_swap(top.begin(), it);
+            } else {
+                if ((int) top.size() >= hot_s && !top.empty()) {
+                    top.back() = 0;
+                }
+                std::rotate(top.begin(), top.end() - 1, top.end());
+            }
+        }
         for (int p = 0; p < (int) top.size() && p < hot_s; p++) {
             ste[p] = top[p];
             dc[p]  = dwell; // initial fill is eligible to be corrected next sync
@@ -375,6 +390,9 @@ void llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
                 break; // no slot free or displaceable under the gate
             }
             const int e_old = ste[p];
+            if (e_old == 0 && ehs_exclusive_mode() == 2) {
+                continue; // expert 0 is the pinned dummy target - never demote it
+            }
             if (e_old >= 0 && ehs_exclusive_mode() == 2) {
                 // demote over PCIe: write the outgoing expert back into its
                 // (anonymous) host range before the slot is overwritten
@@ -508,9 +526,14 @@ void llama_expert_hotstore::log_hit_rate(const std::vector<std::pair<int, ggml_t
         if (!t || !t->data || t->type != GGML_TYPE_I32) {
             continue;
         }
-        const size_t n = ggml_nelements(t);
+        // stride-aware read: t is the non-contiguous topk view (see heatmap)
+        const int64_t k  = t->ne[0];
+        const int64_t nt = t->ne[1] * t->ne[2] * t->ne[3];
+        const size_t  n  = (size_t) (k * nt);
         std::vector<int32_t> ids(n);
-        ggml_backend_tensor_get(t, ids.data(), 0, n * sizeof(int32_t));
+        for (int64_t j = 0; j < nt; j++) {
+            ggml_backend_tensor_get(t, ids.data() + j * k, j * t->nb[1], k * sizeof(int32_t));
+        }
         for (size_t i = 0; i < n; i++) {
             const int32_t id = ids[i];
             if (id >= 0 && id < n_experts) {
