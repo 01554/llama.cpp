@@ -261,6 +261,22 @@ bool llama_expert_hotstore::allocate(ggml_backend_buffer_type_t gpu_buft) {
                 ggml_backend_buffer_clear(buf_cold.get(), 0);
                 slot_to_expert_cold.assign(n_layers, std::vector<int>(cold_s, -1));
                 expert_to_cold_slot.assign(n_layers, std::vector<int>(n_experts, -1));
+                // CPU copies of the cold LUTs for the B2 (CPU compute) cold path
+                {
+                    ggml_init_params lp = {
+                        /*.mem_size   =*/ ggml_tensor_overhead() * (n_layers + 2),
+                        /*.mem_buffer =*/ nullptr,
+                        /*.no_alloc   =*/ true,
+                    };
+                    ggml_context * lctx = ggml_init(lp);
+                    for (int il = 0; il < n_layers; il++) {
+                        luts[il].cold_lut_cpu = ggml_new_tensor_1d(lctx, GGML_TYPE_I32, n_experts);
+                    }
+                    ggml_backend_buffer_t lb = ggml_backend_alloc_ctx_tensors_from_buft(lctx, ggml_backend_cpu_buffer_type());
+                    buf_lut_cpu = ggml_backend_buffer_ptr(lb);
+                    static std::vector<ggml_context *> s_lut_ctxs;
+                    s_lut_ctxs.push_back(lctx);
+                }
                 // keep the metadata context alive alongside the buffer
                 static std::vector<ggml_context *> s_cold_ctxs;
                 s_cold_ctxs.push_back(cctx);
@@ -275,7 +291,7 @@ bool llama_expert_hotstore::allocate(ggml_backend_buffer_type_t gpu_buft) {
     // can find its GPU hot tensor, cold bank and per-layer LUTs.
     for (const auto & e : entries) {
         const auto & L = luts[e.layer_idx];
-        llama_expert_tier_register(e.src, e.dst, e.dst_cold, L.hot_lut, L.cold_mask, L.cold_lut, L.hot_mask);
+        llama_expert_tier_register(e.src, e.dst, e.dst_cold, L.hot_lut, L.cold_mask, L.cold_lut, L.hot_mask, L.cold_lut_cpu);
     }
 
     return true;
@@ -647,6 +663,9 @@ void llama_expert_hotstore::update_luts() {
             }
             ggml_backend_tensor_set(luts[il].cold_lut, cold_lut_h.data(), 0, bytes_i32);
             ggml_backend_tensor_set(luts[il].hot_mask, hot_mask_h.data(), 0, bytes_f32);
+            if (luts[il].cold_lut_cpu && luts[il].cold_lut_cpu->data) {
+                memcpy(luts[il].cold_lut_cpu->data, cold_lut_h.data(), bytes_i32);
+            }
         }
     }
 

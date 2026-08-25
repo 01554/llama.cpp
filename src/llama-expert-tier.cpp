@@ -1,5 +1,6 @@
 #include "llama-expert-tier.h"
 
+#include <cstdlib>
 #include <mutex>
 #include <unordered_map>
 
@@ -11,6 +12,7 @@ namespace {
         ggml_tensor * cold_mask;  // f32 [n_experts] (1 = cold)
         ggml_tensor * cold_lut;   // i32 [n_experts] (bank slot / sentinel), or null
         ggml_tensor * hot_mask;   // f32 [n_experts] (1 = hot), or null
+        ggml_tensor * cold_lut_cpu; // i32 [n_experts] CPU copy for the B2 cold path, or null
     };
 
     std::mutex g_mtx;
@@ -23,9 +25,10 @@ void llama_expert_tier_register(ggml_tensor * src,
                                 ggml_tensor * hot_lut,
                                 ggml_tensor * cold_mask,
                                 ggml_tensor * cold_lut,
-                                ggml_tensor * hot_mask) {
+                                ggml_tensor * hot_mask,
+                                ggml_tensor * cold_lut_cpu) {
     std::lock_guard<std::mutex> lk(g_mtx);
-    g_table[src] = {dst_hot, dst_cold, hot_lut, cold_mask, cold_lut, hot_mask};
+    g_table[src] = {dst_hot, dst_cold, hot_lut, cold_mask, cold_lut, hot_mask, cold_lut_cpu};
 }
 
 void llama_expert_tier_clear() {
@@ -123,7 +126,13 @@ ggml_tensor * llama_expert_tier_build(ggml_context * ctx,
     ggml_tensor * hot = ggml_mul_mat_id(ctx, ent.dst_hot, cur, ids_hot);
 
     ggml_tensor * cold = nullptr;
-    if (ent.dst_cold != nullptr && ent.cold_lut != nullptr && ent.hot_mask != nullptr) {
+    static const bool b2 = getenv("LLAMA_EHS_B2") != nullptr;
+    if (b2 && ent.dst_cold != nullptr && ent.cold_lut_cpu != nullptr) {
+        // B2: exclusive cold bank, computed on the CPU (latency-free host reads).
+        // Real ids + mask semantics as the legacy op; bank rows resolved via the
+        // CPU-resident lut.
+        cold = ggml_mul_mat_id_cold_bank(ctx, ent.dst_cold, cur, ids, ent.cold_mask, ent.cold_lut_cpu);
+    } else if (ent.dst_cold != nullptr && ent.cold_lut != nullptr && ent.hot_mask != nullptr) {
         // Stage C: cold experts live in a pinned-host bank the GPU reads via
         // UVA; both paths are plain GPU mul_mat_id ops and both banks carry
         // zero sentinel slots, so no output masking is needed.

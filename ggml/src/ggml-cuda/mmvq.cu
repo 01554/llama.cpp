@@ -1269,6 +1269,38 @@ static void mul_mat_vec_q_switch_type(
     }
 }
 
+// Expert-tier staging: gather the expert slices a cold-bank mul_mat_id will
+// touch from pinned host memory into a VRAM scratch with one coalesced
+// streaming copy per slice, so the GEMV reads fast VRAM instead of issuing
+// scattered small PCIe transactions. Sentinel slices are zero-filled.
+static __global__ void ehs_stage_slices(
+        const char * __restrict__ bank, const int32_t * __restrict__ ids,
+        char * __restrict__ scratch, int32_t * __restrict__ ids_iota,
+        const int64_t slice_bytes, const int n_eu, const int64_t ids_stride,
+        const uint32_t skip_from) {
+    const int slice = blockIdx.y;         // 0 .. n_slices-1 (= lane + token*n_eu)
+    const int c     = slice % n_eu;
+    const int t     = slice / n_eu;
+    const int32_t id = ids[c + t*ids_stride];
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        ids_iota[slice] = slice;
+    }
+    const int4 * src4 = (const int4 *) (bank + (int64_t) id * slice_bytes);
+    int4       * dst4 = (int4       *) (scratch + (int64_t) slice * slice_bytes);
+    const int64_t n4  = slice_bytes / (int64_t) sizeof(int4);
+    const int64_t stride = (int64_t) gridDim.x * blockDim.x;
+    if ((uint32_t) id >= skip_from) {
+        const int4 z = {0, 0, 0, 0};
+        for (int64_t i = (int64_t) blockIdx.x*blockDim.x + threadIdx.x; i < n4; i += stride) {
+            dst4[i] = z;
+        }
+        return;
+    }
+    for (int64_t i = (int64_t) blockIdx.x*blockDim.x + threadIdx.x; i < n4; i += stride) {
+        dst4[i] = src4[i];
+    }
+}
+
 void ggml_cuda_mul_mat_vec_q(
         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
         const ggml_cuda_mm_fusion_args_host * fusion) {
@@ -1384,6 +1416,33 @@ void ggml_cuda_mul_mat_vec_q(
     const int64_t stride_channel_y   = ids ? s11  : s12;
 
     const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
+
+    static const bool ehs_stage = getenv("LLAMA_EHS_STAGE") != nullptr;
+    if (ehs_stage && ids && skip_from != UINT32_MAX) {
+        // stage the referenced cold-bank slices into VRAM first (see kernel above)
+        const int     n_eu        = (int) nchannels_dst;
+        const int     n_slices    = (int) (nchannels_dst * ncols_dst);
+        const int64_t slice_bytes = src0->nb[2];
+        GGML_ASSERT(slice_bytes % (int64_t) sizeof(int4) == 0);
+
+        ggml_cuda_pool_alloc<char>    scratch(ctx.pool(), (size_t) n_slices * slice_bytes);
+        ggml_cuda_pool_alloc<int32_t> iota(ctx.pool(), (size_t) n_slices);
+
+        const int     threads = 256;
+        const int64_t n4      = slice_bytes / (int64_t) sizeof(int4);
+        const int     blocks  = (int) std::min<int64_t>(256, (n4 + threads - 1) / threads);
+        const dim3 grid(blocks, n_slices);
+        ehs_stage_slices<<<grid, threads, 0, stream>>>(
+            (const char *) src0->data, ids_d, scratch.get(), iota.get(),
+            slice_bytes, n_eu, ids_stride, skip_from);
+
+        mul_mat_vec_q_switch_type(
+            scratch.get(), src0->type, src1_q8_1.get(), iota.get(), fusion_local, dst_d, ne00,
+            ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
+            ne02, nchannels_y, nchannels_dst, s02, stride_channel_y, stride_channel_dst,
+            ne03,              ne3,           s03, s13,              s3,               n_eu, UINT32_MAX, stream);
+        return;
+    }
 
     mul_mat_vec_q_switch_type(
         src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,

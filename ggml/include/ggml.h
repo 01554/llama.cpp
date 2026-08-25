@@ -1460,6 +1460,14 @@ extern "C" {
             struct ggml_tensor  * ids,
             struct ggml_tensor  * cold_mask);
 
+    GGML_API struct ggml_tensor * ggml_mul_mat_id_cold_bank(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * as,
+            struct ggml_tensor  * b,
+            struct ggml_tensor  * ids,
+            struct ggml_tensor  * cold_mask,
+            struct ggml_tensor  * lut);
+
     // A: m columns, n rows,
     // B: p columns, n rows,
     // result is m columns, p rows

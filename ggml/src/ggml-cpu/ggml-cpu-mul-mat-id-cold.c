@@ -60,8 +60,10 @@ void ggml_compute_forward_mul_mat_id_cold(
     const struct ggml_tensor * src1 = dst->src[1];
     const struct ggml_tensor * ids  = dst->src[2];
     const struct ggml_tensor * mask = dst->src[3];
+    const struct ggml_tensor * lut  = dst->src[4]; // optional: real id -> bank slot
 
     const int32_t * cold_mask = (const int32_t *) mask->data;
+    const int32_t * slot_lut  = lut ? (const int32_t *) lut->data : NULL;
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
@@ -143,8 +145,11 @@ void ggml_compute_forward_mul_mat_id_cold(
                     continue;
                 }
 
-                MMID_MATRIX_ROW(i02, matrix_row_counts[i02]) = (struct mmid_row_mapping) {id, iid1};
-                matrix_row_counts[i02] += 1;
+                const int32_t slot = slot_lut ? slot_lut[i02] : i02;
+                assert(slot >= 0 && slot < n_as);
+
+                MMID_MATRIX_ROW(slot, matrix_row_counts[slot]) = (struct mmid_row_mapping) {id, iid1};
+                matrix_row_counts[slot] += 1;
             }
         }
     }

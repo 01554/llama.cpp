@@ -43,8 +43,9 @@ struct llama_expert_hotstore {
     struct layer_lut {
         ggml_tensor * hot_lut   = nullptr; // i32[n_experts]
         ggml_tensor * cold_mask = nullptr; // f32[n_experts] (1 = cold)
-        ggml_tensor * cold_lut  = nullptr; // i32[n_experts] (cold bank slot / sentinel)
-        ggml_tensor * hot_mask  = nullptr; // f32[n_experts] (1 = hot)
+        ggml_tensor * cold_lut  = nullptr; // i32[n_experts] (cold bank slot / sentinel), GPU
+        ggml_tensor * hot_mask  = nullptr; // f32[n_experts] (1 = hot), GPU
+        ggml_tensor * cold_lut_cpu = nullptr; // i32[n_experts] CPU copy for the B2 cold op
     };
     std::vector<layer_lut> luts; // size n_layers
 
@@ -65,6 +66,7 @@ struct llama_expert_hotstore {
     std::vector<std::vector<int>> slot_to_expert_cold; // [layer][cold slot] -> expert
     std::vector<std::vector<int>> expert_to_cold_slot; // [layer][expert] -> cold slot or -1
     ggml_backend_buffer_ptr buf_cold;
+    ggml_backend_buffer_ptr buf_lut_cpu;
     std::vector<uint8_t> swap_tmp; // scratch for one expert slice during swaps
 
     // true once the first copy of the top-S experts landed (once per session)
