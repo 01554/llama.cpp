@@ -178,7 +178,10 @@ bool llama_expert_hotstore::allocate(ggml_backend_buffer_type_t gpu_buft) {
     // 1 sentinel slot (index hot_s) that stays zero so cold selections read
     // zeros via a valid in-range index (sentinel trick, oldtricks Trick 2).
     for (auto & e : entries) {
-        e.dst = ggml_new_tensor_3d(ctx.get(), e.src->type, e.src->ne[0], e.src->ne[1], hot_s + 1);
+        // hot_s live slots + 8 zero sentinel slots (one per possible expert lane):
+        // the tier remap sends cold lane j to slot hot_s + j, so every id within a
+        // token stays DISTINCT and the batched (MMQ) mul_mat_id compaction is safe.
+        e.dst = ggml_new_tensor_3d(ctx.get(), e.src->type, e.src->ne[0], e.src->ne[1], hot_s + 8);
     }
 
     // per-layer LUTs and masks for in-graph routing (oldtricks Trick 4).

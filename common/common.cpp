@@ -1309,6 +1309,9 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             cparams_dft.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
         }
         cparams_dft.n_rs_seq = 0;
+        // the draft/MTP model is small enough to live fully on the GPU; a second
+        // hot store there is wasted VRAM and (empirically) degrades draft quality
+        cparams_dft.expert_hot_s = 0;
 
         const common_fit_extra_model extra = {
             /*.path_model   =*/ params_dft.model.path.c_str(),

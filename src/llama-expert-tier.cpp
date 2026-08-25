@@ -43,6 +43,7 @@ bool llama_expert_tier_has(ggml_tensor * w) {
 // contiguous across the n_expert_used * n_tokens layout.
 static ggml_tensor * remap_ids(ggml_context * ctx,
                               ggml_tensor * lut,
+                              ggml_tensor * cold_mask,
                               ggml_tensor * selected,
                               int n_experts,
                               int n_expert_used,
@@ -52,7 +53,21 @@ static ggml_tensor * remap_ids(ggml_context * ctx,
     ggml_tensor * flat_ids = ggml_reshape_1d(ctx,
         ggml_cont(ctx, selected), n_expert_used * n_tokens);             // [n_eu*n_tok] i32
     ggml_tensor * r = ggml_get_rows(ctx, lut_rows, flat_ids);            // [1, n_eu*n_tok, 1, 1] i32
-    return ggml_reshape_2d(ctx, r, n_expert_used, n_tokens);              // [n_eu, n_tok]
+    // lane-distinct sentinels: cold lanes map to hot_s + lane instead of a single
+    // shared sentinel, so ids within one token never repeat (required by the
+    // batched CUDA mul_mat_id compaction; verified empirically via draft
+    // acceptance, which collapses with duplicated sentinel ids).
+    ggml_tensor * mask_rows = ggml_reshape_2d(ctx, cold_mask, 1, n_experts);
+    ggml_tensor * cold_flat = ggml_get_rows(ctx, mask_rows, flat_ids);   // [1, n_eu*n_tok] f32 (1=cold)
+    cold_flat = ggml_reshape_1d(ctx, cold_flat, n_expert_used * n_tokens);
+    ggml_tensor * lane = ggml_arange(ctx, 0.0f, (float) n_expert_used, 1.0f); // [n_eu] f32
+    ggml_tensor * lane_rep = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_expert_used * n_tokens);
+    lane_rep = ggml_repeat(ctx, lane, lane_rep);                          // 0..n_eu-1 repeated
+    ggml_tensor * off = ggml_mul(ctx, cold_flat, lane_rep);               // lane where cold, 0 where hot
+    ggml_tensor * r_f = ggml_cast(ctx, ggml_reshape_1d(ctx, r, n_expert_used * n_tokens), GGML_TYPE_F32);
+    ggml_tensor * sum = ggml_add(ctx, r_f, off);
+    ggml_tensor * out = ggml_cast(ctx, sum, GGML_TYPE_I32);
+    return ggml_reshape_2d(ctx, out, n_expert_used, n_tokens);            // [n_eu, n_tok]
 }
 
 // Build a per-(expert_used, token) mask f32 [1, n_expert_used, n_tokens, 1]
@@ -78,11 +93,9 @@ ggml_tensor * llama_expert_tier_build(ggml_context * ctx,
                                       ggml_tensor * w_s) {
     // BUG-3E3: CUDA MMQ mul_mat_id compaction assumes distinct expert ids per token;
     // our sentinel duplicates OOB there. Decode (n_tokens==1) is safe via mmvq.
-    // BUG-3E3 confirmed empirically even for small batches (draft acceptance
-    // collapses 93% -> 38% when this gate is relaxed to <= 8): the batched
-    // mul_mat_id paths mis-handle our duplicated sentinel ids. A correct batch
-    // path needs lane-distinct sentinel slots - until then, single-token only.
-    if (cur->ne[2] > 1) return nullptr;
+    // lane-distinct sentinels make ids unique per token, so small verification
+    // batches are safe; larger (prefill-sized) batches still fall back for now.
+    if (cur->ne[2] > 8) return nullptr;
 
     tier_entry ent;
     {
@@ -100,7 +113,7 @@ ggml_tensor * llama_expert_tier_build(ggml_context * ctx,
 
     // hot path: GPU tier tensor. Remap real expert ids through hot_lut
     // -> hot slot indices (sentinel S for cold experts = zero contribution).
-    ggml_tensor * ids_hot = remap_ids(ctx, ent.hot_lut, ids, n_experts, n_expert_used, n_tokens);
+    ggml_tensor * ids_hot = remap_ids(ctx, ent.hot_lut, ent.cold_mask, ids, n_experts, n_expert_used, n_tokens);
     ggml_tensor * hot = ggml_mul_mat_id(ctx, ent.dst_hot, cur, ids_hot);
 
     // cold path: dedicated CPU op that computes ONLY cold-selected experts.

@@ -2394,6 +2394,12 @@ common_speculative_init_result::common_speculative_init_result(
     // note: for small models maybe we can set this to the maximum possible draft from all speculative types
     //       the extra memory for small models is likely negligible?
     cparams.n_rs_seq  = 0;
+    // never build an expert hot store for a speculative context: on the
+    // shared-model (MTP) path it would double-register the target weights in
+    // the tier table and clobber the main context hot store (empirically:
+    // draft acceptance collapses 93% -> 38%); the standalone-draft models are
+    // small enough to not need one.
+    cparams.expert_hot_s = 0;
     cparams.ctx_other = ctx_tgt;
 
     std::string model_path;

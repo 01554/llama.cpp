@@ -257,6 +257,11 @@ static void parse_tensor_buffer_overrides(const std::string & value, std::vector
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
         auto * dev = ggml_backend_dev_get(i);
         auto * buft = ggml_backend_dev_buffer_type(dev);
+        // also expose each device host buffer type (e.g. CUDA_Host) so tensors
+        // can be pinned in host memory while staying visible to the device
+        if (auto * hbuft = ggml_backend_dev_host_buffer_type(dev)) {
+            buft_list[ggml_backend_buft_name(hbuft)] = hbuft;
+        }
         if (buft) {
             buft_list[ggml_backend_buft_name(buft)] = buft;
         }

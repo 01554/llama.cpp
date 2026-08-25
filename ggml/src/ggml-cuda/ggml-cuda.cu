@@ -5320,7 +5320,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
 static bool ggml_backend_cuda_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
     const bool integrated = ggml_cuda_info().devices[dev_ctx->device].integrated;
-    return (ggml_backend_buft_is_cuda(buft) && buft->device == dev) || (integrated && ggml_backend_buft_is_cuda_host(buft));
+    // GGML_CUDA_ALLOW_HOST_BUFT=1: let discrete GPUs compute directly over
+    // pinned host memory (UVA zero-copy reads over PCIe), as integrated
+    // devices already do - used for MoE expert offload experiments.
+    static const bool allow_host = getenv("GGML_CUDA_ALLOW_HOST_BUFT") != nullptr;
+    return (ggml_backend_buft_is_cuda(buft) && buft->device == dev) || ((integrated || allow_host) && ggml_backend_buft_is_cuda_host(buft));
 }
 
 static int64_t get_op_batch_size(const ggml_tensor * op) {
