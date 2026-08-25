@@ -8,6 +8,7 @@
 #include "ggml-backend.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <regex>
 
@@ -163,8 +164,9 @@ bool llama_expert_hotstore::allocate(ggml_backend_buffer_type_t gpu_buft) {
 
     // a no_alloc context just for the hot tensor metadata
     // (also holds the per-layer LUT/mask tensors created below)
+    cold_bank = getenv("LLAMA_EHS_COLD_BANK") != nullptr;
     ggml_init_params params = {
-        /*.mem_size   =*/ ggml_tensor_overhead() * (entries.size() + 4 * n_layers),
+        /*.mem_size   =*/ ggml_tensor_overhead() * (2 * entries.size() + 8 * n_layers),
         /*.mem_buffer =*/ nullptr,
         /*.no_alloc   =*/ true,
     };
@@ -190,6 +192,10 @@ bool llama_expert_hotstore::allocate(ggml_backend_buffer_type_t gpu_buft) {
     for (int il = 0; il < n_layers; il++) {
         luts[il].hot_lut   = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, n_experts);
         luts[il].cold_mask = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, n_experts);
+        if (cold_bank) {
+            luts[il].cold_lut = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, n_experts);
+            luts[il].hot_mask = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, n_experts);
+        }
     }
 
     // check whether the buffer would fit before committing any VRAM
@@ -224,11 +230,52 @@ bool llama_expert_hotstore::allocate(ggml_backend_buffer_type_t gpu_buft) {
     // slots 0..hot_s-1, so slot hot_s stays zero for the lifetime of the store.
     ggml_backend_buffer_clear(buf.get(), 0);
 
+    // Stage C: allocate the pinned cold bank on the device host buffer type.
+    // cold_s live slots + 8 zero sentinel slots (hot lanes route here).
+    if (cold_bank) {
+        cold_s = n_experts - hot_s;
+        ggml_backend_dev_t bdev = ggml_backend_buft_get_device(gpu_buft);
+        ggml_backend_buffer_type_t host_buft = bdev ? ggml_backend_dev_host_buffer_type(bdev) : nullptr;
+        if (cold_s <= 0 || host_buft == nullptr) {
+            LLAMA_LOG_ERROR("%s: cold bank disabled (cold_s=%d, host_buft=%p)\n", __func__, cold_s, (void *) host_buft);
+            cold_bank = false;
+        } else {
+            ggml_init_params cparams2 = {
+                /*.mem_size   =*/ ggml_tensor_overhead() * (entries.size() + 2),
+                /*.mem_buffer =*/ nullptr,
+                /*.no_alloc   =*/ true,
+            };
+            ggml_context * cctx = ggml_init(cparams2);
+            for (auto & e : entries) {
+                e.dst_cold = ggml_new_tensor_3d(cctx, e.src->type, e.src->ne[0], e.src->ne[1], cold_s + 8);
+            }
+            ggml_backend_buffer_t cb = ggml_backend_alloc_ctx_tensors_from_buft(cctx, host_buft);
+            if (cb == nullptr) {
+                LLAMA_LOG_ERROR("%s: cold bank allocation failed, disabled\n", __func__);
+                for (auto & e : entries) { e.dst_cold = nullptr; }
+                cold_bank = false;
+                ggml_free(cctx);
+            } else {
+                buf_cold = ggml_backend_buffer_ptr(cb);
+                ggml_backend_buffer_set_usage(buf_cold.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+                ggml_backend_buffer_clear(buf_cold.get(), 0);
+                slot_to_expert_cold.assign(n_layers, std::vector<int>(cold_s, -1));
+                expert_to_cold_slot.assign(n_layers, std::vector<int>(n_experts, -1));
+                // keep the metadata context alive alongside the buffer
+                static std::vector<ggml_context *> s_cold_ctxs;
+                s_cold_ctxs.push_back(cctx);
+                LLAMA_LOG("=== Expert cold bank: %d slots/layer in %s (%.1f GiB pinned) ===\n",
+                          cold_s, ggml_backend_buft_name(host_buft),
+                          ggml_backend_buffer_get_size(cb) / (1024.0*1024.0*1024.0));
+            }
+        }
+    }
+
     // register each expert weight tensor with the tier hook so build_lora_mm_id
-    // can find its GPU hot tensor and per-layer LUTs.
+    // can find its GPU hot tensor, cold bank and per-layer LUTs.
     for (const auto & e : entries) {
         const auto & L = luts[e.layer_idx];
-        llama_expert_tier_register(e.src, e.dst, L.hot_lut, L.cold_mask);
+        llama_expert_tier_register(e.src, e.dst, e.dst_cold, L.hot_lut, L.cold_mask, L.cold_lut, L.hot_mask);
     }
 
     return true;
@@ -282,6 +329,37 @@ void llama_expert_hotstore::copy_top_s(const llama_expert_heatmap & heatmap) {
                 ehs_release_host(src + (size_t) ex * slot, slot);
             }
         }
+    }
+
+    // Stage C: fill the cold bank with every non-hot expert (host memcpy from
+    // the mmap source; after this the source pages are never read again).
+    if (cold_bank) {
+        for (int il = 0; il < n_layers; il++) {
+            const auto & ste = slot_to_expert[il];
+            std::vector<char> is_hot(n_experts, 0);
+            for (int p = 0; p < hot_s; p++) {
+                if (ste[p] >= 0) is_hot[ste[p]] = 1;
+            }
+            auto & stec = slot_to_expert_cold[il];
+            auto & e2c  = expert_to_cold_slot[il];
+            int q = 0;
+            for (int e = 0; e < n_experts; e++) {
+                if (is_hot[e]) continue;
+                if (q >= cold_s) break;
+                stec[q] = e;
+                e2c[e]  = q;
+                for (entry * ent : entries_by_layer[il]) {
+                    const size_t slot = ggml_nbytes(ent->src) / (size_t) ent->src->ne[2];
+                    const char * src = ent->src->data ? (const char *) ggml_get_data(ent->src) : nullptr;
+                    char * dstc = ent->dst_cold ? (char *) ent->dst_cold->data : nullptr;
+                    if (src && dstc) {
+                        memcpy(dstc + (size_t) q * slot, src + (size_t) e * slot, slot);
+                    }
+                }
+                q++;
+            }
+        }
+        LLAMA_LOG("=== Expert cold bank: filled ===\n");
     }
 
     last_sync_tokens = heatmap.tokens_total;
@@ -393,6 +471,44 @@ void llama_expert_hotstore::resync_top_s(const llama_expert_heatmap & heatmap) {
                 break; // no slot free or displaceable under the gate
             }
             const int e_old = ste[p];
+            if (cold_bank) {
+                const int q = expert_to_cold_slot[il][e_cold];
+                if (q < 0) {
+                    continue; // promoted candidate not in bank (should not happen)
+                }
+                for (entry * ent : entries_by_layer[il]) {
+                    const size_t slot = ggml_nbytes(ent->src) / (size_t) ent->src->ne[2];
+                    char * bank = ent->dst_cold ? (char *) ent->dst_cold->data : nullptr;
+                    if (!bank) continue;
+                    if (e_old >= 0) {
+                        swap_tmp.resize(slot);
+                        // demote: VRAM slot p -> tmp
+                        ggml_backend_tensor_get(ent->dst, swap_tmp.data(), (size_t) p * slot, slot);
+                    }
+                    // promote: bank slot q -> VRAM slot p (H2D from pinned host)
+                    ggml_backend_tensor_set(ent->dst, bank + (size_t) q * slot, (size_t) p * slot, slot);
+                    if (e_old >= 0) {
+                        // demote lands in the vacated bank slot
+                        memcpy(bank + (size_t) q * slot, swap_tmp.data(), slot);
+                    }
+                }
+                auto & stec = slot_to_expert_cold[il];
+                auto & e2c  = expert_to_cold_slot[il];
+                e2c[e_cold] = -1;
+                if (e_old >= 0) {
+                    stec[q]    = e_old;
+                    e2c[e_old] = q;
+                } else {
+                    stec[q] = -1;
+                }
+                ste[p] = e_cold;
+                dc[p]  = -elapsed;
+                swapped++;
+                if (++g_ehs_swaps % 500 == 0) {
+                    LLAMA_LOG("EHS_SWAPS(bank): %d total\n", g_ehs_swaps);
+                }
+                continue;
+            }
             if (e_old == 0 && ehs_exclusive_mode() == 2) {
                 continue; // expert 0 is the pinned dummy target - never demote it
             }
@@ -513,6 +629,25 @@ void llama_expert_hotstore::update_luts() {
         const size_t bytes_f32 = n_experts * sizeof(float);
         ggml_backend_tensor_set(luts[il].hot_lut,   hot_lut_h.data(),   0, bytes_i32);
         ggml_backend_tensor_set(luts[il].cold_mask, cold_mask_h.data(), 0, bytes_f32);
+
+        if (cold_bank && luts[il].cold_lut && luts[il].hot_mask) {
+            std::vector<int32_t> cold_lut_h(n_experts);
+            std::vector<float>   hot_mask_h(n_experts);
+            const auto & e2c = expert_to_cold_slot[il];
+            for (int e = 0; e < n_experts; e++) {
+                if (cold_mask_h[e] != 0.0f) {
+                    // cold: its bank slot (fallback to sentinel if unmapped)
+                    cold_lut_h[e] = e2c[e] >= 0 ? e2c[e] : cold_s;
+                    hot_mask_h[e] = 0.0f;
+                } else {
+                    // hot: bank sentinel base (lane offset added in-graph)
+                    cold_lut_h[e] = cold_s;
+                    hot_mask_h[e] = 1.0f;
+                }
+            }
+            ggml_backend_tensor_set(luts[il].cold_lut, cold_lut_h.data(), 0, bytes_i32);
+            ggml_backend_tensor_set(luts[il].hot_mask, hot_mask_h.data(), 0, bytes_f32);
+        }
     }
 
     luts_version++;

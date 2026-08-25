@@ -24,8 +24,9 @@ struct llama_expert_hotstore {
     // one hot tensor per expert weight tensor, shape {ne0, ne1, hot_s}
     struct entry {
         int          layer_idx;
-        ggml_tensor* src; // model tensor holding all n_experts slices
-        ggml_tensor* dst; // hot tensor holding hot_s slots
+        ggml_tensor* src;      // model tensor holding all n_experts slices
+        ggml_tensor* dst;      // hot tensor holding hot_s slots (VRAM)
+        ggml_tensor* dst_cold; // cold bank holding cold_s slots (pinned host), or null
     };
     std::vector<entry> entries;
 
@@ -41,7 +42,9 @@ struct llama_expert_hotstore {
     // cold_mask[e] = 1.0f if e is cold, else 0.0f (passed to mul_mat_id_cold).
     struct layer_lut {
         ggml_tensor * hot_lut   = nullptr; // i32[n_experts]
-        ggml_tensor * cold_mask = nullptr; // f32[n_experts]
+        ggml_tensor * cold_mask = nullptr; // f32[n_experts] (1 = cold)
+        ggml_tensor * cold_lut  = nullptr; // i32[n_experts] (cold bank slot / sentinel)
+        ggml_tensor * hot_mask  = nullptr; // f32[n_experts] (1 = hot)
     };
     std::vector<layer_lut> luts; // size n_layers
 
@@ -52,6 +55,17 @@ struct llama_expert_hotstore {
     // keeps the GPU buffer (and its no_alloc context) alive
     ggml_context_ptr        ctx;
     ggml_backend_buffer_ptr buf;
+
+    // Stage C cold bank (LLAMA_EHS_COLD_BANK=1): every non-hot expert lives in
+    // a compact pinned-host bank that the GPU reads directly (UVA), replacing
+    // the CPU cold path entirely. slot_to_expert_cold / expert_to_cold_slot
+    // track membership; migration swaps bytes VRAM <-> bank over PCIe.
+    bool cold_bank = false;
+    int  cold_s    = 0;
+    std::vector<std::vector<int>> slot_to_expert_cold; // [layer][cold slot] -> expert
+    std::vector<std::vector<int>> expert_to_cold_slot; // [layer][expert] -> cold slot or -1
+    ggml_backend_buffer_ptr buf_cold;
+    std::vector<uint8_t> swap_tmp; // scratch for one expert slice during swaps
 
     // true once the first copy of the top-S experts landed (once per session)
     bool is_filled = false;

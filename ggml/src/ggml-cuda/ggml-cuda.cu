@@ -1919,6 +1919,7 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
             if (ggml_is_quantized(src0->type)) {
                 const int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
                 if (ne2 <= mmvq_mmid_max) {
+                    if (getenv("GGML_MMID_TRACE")) fprintf(stderr, "%s ne2=%lld type=%d\n", "MMID_PATH mmvq", (long long) ne2, (int) src0->type);
                     ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
                     return;
                 }
@@ -1931,16 +1932,19 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         }
 
         if (ggml_cuda_should_use_mmq(src0->type, cc, ne12, /*n_experts=*/ne02)) {
-            ggml_cuda_mul_mat_q(ctx, src0, src1, ids, dst);
+            if (getenv("GGML_MMID_TRACE")) fprintf(stderr, "%s ne2=%lld type=%d\n", "MMID_PATH mmq", (long long) ne2, (int) src0->type);
+                    ggml_cuda_mul_mat_q(ctx, src0, src1, ids, dst);
             return;
         }
 
         if (ggml_cuda_should_use_mmf(src0->type, cc, WARP_SIZE, src0->ne, src0->nb, src1->ne[2], /*mul_mat_id=*/true)) {
-            ggml_cuda_mul_mat_f(ctx, src0, src1, ids, dst);
+            if (getenv("GGML_MMID_TRACE")) fprintf(stderr, "%s ne2=%lld type=%d\n", "MMID_PATH mmf", (long long) ne2, (int) src0->type);
+                    ggml_cuda_mul_mat_f(ctx, src0, src1, ids, dst);
             return;
         }
     }
 
+    if (getenv("GGML_MMID_TRACE")) fprintf(stderr, "MMID_PATH fallback-sync ne2=%lld type=%d\n", (long long) ne2, (int) src0->type);
     // note: this path should not be reached when recording CUDA graphs, because it requires stream synchronization
     GGML_ASSERT(ggml_cuda_mul_mat_id_needs_sync(dst, cc));
     cudaStream_t stream = ctx.stream();

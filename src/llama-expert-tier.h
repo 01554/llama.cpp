@@ -32,8 +32,11 @@
 // the LUT/mask tensors. Multiple entries per layer share the same luts[i].
 void llama_expert_tier_register(ggml_tensor * src,
                                 ggml_tensor * dst_hot,
+                                ggml_tensor * dst_cold,
                                 ggml_tensor * hot_lut,
-                                ggml_tensor * cold_mask);
+                                ggml_tensor * cold_mask,
+                                ggml_tensor * cold_lut,
+                                ggml_tensor * hot_mask);
 
 // drop the entire table (called by hotstore destructor)
 void llama_expert_tier_clear();

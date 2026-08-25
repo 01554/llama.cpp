@@ -5,9 +5,12 @@
 
 namespace {
     struct tier_entry {
-        ggml_tensor * dst_hot;    // [ne0, ne1, hot_s + 1]
+        ggml_tensor * dst_hot;    // [ne0, ne1, hot_s + 8]
+        ggml_tensor * dst_cold;   // pinned-host cold bank [ne0, ne1, cold_s + 8], or null
         ggml_tensor * hot_lut;    // i32 [n_experts]
-        ggml_tensor * cold_mask;  // f32 [n_experts] (read as int zero-check by cold op)
+        ggml_tensor * cold_mask;  // f32 [n_experts] (1 = cold)
+        ggml_tensor * cold_lut;   // i32 [n_experts] (bank slot / sentinel), or null
+        ggml_tensor * hot_mask;   // f32 [n_experts] (1 = hot), or null
     };
 
     std::mutex g_mtx;
@@ -16,10 +19,13 @@ namespace {
 
 void llama_expert_tier_register(ggml_tensor * src,
                                 ggml_tensor * dst_hot,
+                                ggml_tensor * dst_cold,
                                 ggml_tensor * hot_lut,
-                                ggml_tensor * cold_mask) {
+                                ggml_tensor * cold_mask,
+                                ggml_tensor * cold_lut,
+                                ggml_tensor * hot_mask) {
     std::lock_guard<std::mutex> lk(g_mtx);
-    g_table[src] = {dst_hot, hot_lut, cold_mask};
+    g_table[src] = {dst_hot, dst_cold, hot_lut, cold_mask, cold_lut, hot_mask};
 }
 
 void llama_expert_tier_clear() {
@@ -116,10 +122,17 @@ ggml_tensor * llama_expert_tier_build(ggml_context * ctx,
     ggml_tensor * ids_hot = remap_ids(ctx, ent.hot_lut, ent.cold_mask, ids, n_experts, n_expert_used, n_tokens);
     ggml_tensor * hot = ggml_mul_mat_id(ctx, ent.dst_hot, cur, ids_hot);
 
-    // cold path: dedicated CPU op that computes ONLY cold-selected experts.
-    // ent.cold_mask is f32 [n_experts] with 1.0f = cold; the op treats it
-    // as integer-zero-check (0.0f = hot = skip, non-zero = cold = compute).
-    ggml_tensor * cold = ggml_mul_mat_id_cold(ctx, w, cur, ids, ent.cold_mask);
+    ggml_tensor * cold = nullptr;
+    if (ent.dst_cold != nullptr && ent.cold_lut != nullptr && ent.hot_mask != nullptr) {
+        // Stage C: cold experts live in a pinned-host bank the GPU reads via
+        // UVA; both paths are plain GPU mul_mat_id ops and both banks carry
+        // zero sentinel slots, so no output masking is needed.
+        ggml_tensor * ids_cold = remap_ids(ctx, ent.cold_lut, ent.hot_mask, ids, n_experts, n_expert_used, n_tokens);
+        cold = ggml_mul_mat_id(ctx, ent.dst_cold, cur, ids_cold);
+    } else {
+        // legacy: dedicated CPU op that computes ONLY cold-selected experts.
+        cold = ggml_mul_mat_id_cold(ctx, w, cur, ids, ent.cold_mask);
+    }
 
     // per-expert quant scale on both paths
     if (w_s) {
