@@ -124,6 +124,8 @@ llama_expert_hotstore::llama_expert_hotstore(
     sync_period(sync_period),
     hyst(hyst),
     dwell(dwell) {
+    n_sent = std::max(8, (int) model->hparams.n_expert_used);
+
     if (n_layers <= 0) {
         return;
     }
@@ -183,7 +185,7 @@ bool llama_expert_hotstore::allocate(ggml_backend_buffer_type_t gpu_buft) {
         // hot_s live slots + 8 zero sentinel slots (one per possible expert lane):
         // the tier remap sends cold lane j to slot hot_s + j, so every id within a
         // token stays DISTINCT and the batched (MMQ) mul_mat_id compaction is safe.
-        e.dst = ggml_new_tensor_3d(ctx.get(), e.src->type, e.src->ne[0], e.src->ne[1], hot_s + 8);
+        e.dst = ggml_new_tensor_3d(ctx.get(), e.src->type, e.src->ne[0], e.src->ne[1], hot_s + n_sent);
     }
 
     // per-layer LUTs and masks for in-graph routing (oldtricks Trick 4).
@@ -247,7 +249,7 @@ bool llama_expert_hotstore::allocate(ggml_backend_buffer_type_t gpu_buft) {
             };
             ggml_context * cctx = ggml_init(cparams2);
             for (auto & e : entries) {
-                e.dst_cold = ggml_new_tensor_3d(cctx, e.src->type, e.src->ne[0], e.src->ne[1], cold_s + 8);
+                e.dst_cold = ggml_new_tensor_3d(cctx, e.src->type, e.src->ne[0], e.src->ne[1], cold_s + n_sent);
             }
             ggml_backend_buffer_t cb = ggml_backend_alloc_ctx_tensors_from_buft(cctx, host_buft);
             if (cb == nullptr) {

@@ -1,5 +1,7 @@
 #include "llama-expert-tier.h"
 
+#include <algorithm>
+
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
@@ -140,7 +142,7 @@ ggml_tensor * llama_expert_tier_build(ggml_context * ctx,
         cold = ggml_mul_mat_id(ctx, ent.dst_cold, cur, ids_cold);
         // tag the node so the CUDA mmvq path skips sentinel (>= cold_s) reads
         cold->op_params[14] = (int32_t) 0x51D3C01D;
-        cold->op_params[15] = (int32_t) (ent.dst_cold->ne[2] - 8);
+        cold->op_params[15] = (int32_t) (ent.dst_cold->ne[2] - std::max(8, n_expert_used));
     } else {
         // legacy: dedicated CPU op that computes ONLY cold-selected experts.
         cold = ggml_mul_mat_id_cold(ctx, w, cur, ids, ent.cold_mask);

@@ -16,6 +16,9 @@ struct llama_expert_hotstore {
     int n_layers;
     int n_experts;
     int hot_s;
+    // sentinel slots appended to each bank: one per routing lane so cold
+    // lane j can map to slot base+j with distinct in-range ids (top-k > 8 safe)
+    int n_sent = 8;
 
     // bytes of a single expert slot per layer, summed over that layer's
     // expert weight tensors (gate/up/down, incl. chexps variants)
