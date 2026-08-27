@@ -24,6 +24,46 @@ Hardware for all numbers below: **1x RTX PRO 6000 Blackwell Max-Q (300W) 96GB + 
 - Sampling: official thinking-mode settings (temp 1.0, top-p 0.95). Server flags:
   `-c 8192 -fa on --jinja` (+`-b 2048 -ub 2048` for the prefill run).
 
+## Reproduce (Flash-Next, 32GB-cap result)
+
+```bash
+git clone -b expert-tier https://github.com/01554/llama.cpp
+cd llama.cpp
+cmake -B build -DGGML_CUDA=ON -DLLAMA_BUILD_TESTS=OFF
+cmake --build build --config Release -t llama-server -j $(nproc)
+
+# model (111GB)
+hf download unsloth/Qwen3.8-Flash-Next-GGUF --include "UD-Q4_K_XL/*" --local-dir models
+```
+
+Optional - simulate a 32GB card on a bigger one (hold 64GiB in a dummy process):
+
+```c
+// balloon.cu - build: nvcc -o balloon balloon.cu ; run: ./balloon 64 &
+#include <cuda_runtime.h>
+#include <unistd.h>
+int main(int c, char **v) { void *p; cudaMalloc(&p, (c>1?atoll(v[1]):64ULL)<<30); for(;;) sleep(3600); }
+```
+
+Baseline (plain layer-split offload, ~24 tok/s under the 32GB cap):
+
+```bash
+./build/bin/llama-server -m models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  -ngl 99 --n-cpu-moe 36 -c 8192 -fa on --jinja
+```
+
+This fork's expert hot cache (~33 tok/s under the same cap):
+
+```bash
+LLAMA_EHS_SWAPS_PER_TOK=1 \
+./build/bin/llama-server -m models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  -ngl 99 --cpu-moe --expert-hot-s 140 -c 8192 -fa on --jinja
+```
+
+Full-VRAM (no cap, 96GB card): drop the balloon and the offload flags, just `-ngl 99` (~75 tok/s).
+Host RAM needed for the capped runs: ~96GB (60GB cold experts + 27GB n-gram table).
+Sampling for quality checks: temp 1.0, top-p 0.95 (official thinking-mode settings).
+
 ## Expert-tier machinery (measured on DeepSeek V4-Flash 0731, UD-Q4_K_XL 155GB)
 
 Single GPU cannot hold the 145GB expert pool; the branch adds:
