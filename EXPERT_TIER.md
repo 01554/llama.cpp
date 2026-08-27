@@ -10,10 +10,21 @@ ordinary host RAM. On models with skewed routing this beats layer-split offload 
 **Headline result** — Qwen3.8-Flash-Next (176B total, unsloth UD-Q4_K_XL) with VRAM
 **capped to 32GB** (RTX 5090-sized) + 96GB host RAM:
 
-| 32GB-cap config | decode |
-|---|---:|
-| plain layer-split (`--n-cpu-moe 36`) | 24.2 tok/s |
-| **this fork, expert hot cache (`--expert-hot-s 140`)** | **32.9 tok/s (+36%)** |
+| 32GB-cap config | decode | prefill (4k / 7k) |
+|---|---:|---:|
+| plain layer-split (`--n-cpu-moe 36`) | 24.2 tok/s | 421 / 416 t/s |
+| **this fork, expert hot cache (`--expert-hot-s 140`)** | **32.9 tok/s (+36%, converged)** | 325 / 320 t/s |
+
+Decode converges over ~10k generated tokens (cold start ~22 tok/s, then 25 -> 30 -> 33 as
+the cache adapts at 1 swap/token). The hot cache is a decode optimization: prefill batches
+touch nearly all 512 experts, so they bypass the cache and take the plain CPU-offload path -
+keep more full layers on the GPU (`--n-cpu-moe`) if prefill matters for your workload.
+
+> **2026-08-27 correction**: the initially published 32.9 figure was measured on a build with
+> a sentinel-sizing bug (8 hardcoded sentinel lanes vs this model's top-10 routing; commit
+> 3e8f3759b fixes it) that made every hot-cache token read out-of-bounds weights and produce
+> degenerate output. The corrected build converges to the same ~33 tok/s with sane output,
+> so the headline stands - but any hot-cache run before that commit was generating garbage.
 
 Uncapped on the full 96GB card: 74.9 tok/s decode / 2922 t/s prefill (pp4096).
 Hardware for all numbers: 1x RTX PRO 6000 Blackwell Max-Q (300W) + 128GB DDR4 dual-channel.
@@ -25,8 +36,8 @@ Hardware for all numbers: 1x RTX PRO 6000 Blackwell Max-Q (300W) + 128GB DDR4 du
 | `-ngl 99 --n-cpu-moe 10` | 65 GB | 43.8 tok/s | |
 | `-ngl 99 --n-cpu-moe 3` | 76 GB | 60.5 tok/s | |
 | **`-ngl 99` (all experts on GPU)** | **80 GB** | **74.9 tok/s** | **2210 tok/s** |
-| VRAM capped to 32GB (64GB balloon) `--n-cpu-moe 36` | ~28 GB | 24.2 tok/s |
-| VRAM capped to 32GB, **`--cpu-moe --expert-hot-s 140`** (this fork) | ~31 GB | **32.9 tok/s** | |
+| VRAM capped to 32GB (64GB balloon) `--n-cpu-moe 36` | ~28 GB | 24.2 tok/s | 421 tok/s |
+| VRAM capped to 32GB, **`--cpu-moe --expert-hot-s 140`** (this fork) | ~31 GB | **32.9 tok/s** (converged, see note above) | 325 tok/s |
 
 - The 51B n-gram (PLE) table stays host-resident (~27GB) — its per-token cost is a few KB of
   row gathers, so "table in RAM" is effectively free. This is what makes the model fit.
