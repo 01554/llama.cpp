@@ -96,6 +96,17 @@ Single GPU cannot hold the 145GB expert pool; the branch adds:
   93%→38% bug), `ffn_moe_topk` stride handling, `GGML_CUDA_ALLOW_HOST_BUFT=1` to let
   discrete GPUs compute over pinned host memory (UVA), and more — see commit log.
 
+## Acknowledgements
+
+None of the day-1 numbers here would exist without the [Unsloth](https://github.com/unslothai/unsloth)
+team: **danielhanchen** authored the qwen4exp llama.cpp support
+([PR #27742](https://github.com/ggml-org/llama.cpp/pull/27742)) that this branch builds on,
+and Unsloth shipped the UD-Q4_K_XL dynamic quants of a brand-new 176B architecture within
+hours of the model drop. Getting a hybrid-attention + n-gram-PLE + 512-expert model
+converted, quantized and running this fast is seriously impressive work.
+Thanks also to the Qwen team for designing the PLE table to be offload-friendly in the
+first place — and saying so on the model card, which is what made us try it.
+
 ## Context
 
 Written up during day-0 bring-up of Qwen3.8-Flash-Next; related reports:
