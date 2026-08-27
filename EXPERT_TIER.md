@@ -26,7 +26,9 @@ keep more full layers on the GPU (`--n-cpu-moe`) if prefill matters for your wor
 > degenerate output. The corrected build converges to the same ~33 tok/s with sane output,
 > so the headline stands - but any hot-cache run before that commit was generating garbage.
 
-Uncapped on the full 96GB card: 74.9 tok/s decode / 2922 t/s prefill (pp4096).
+Uncapped on the full 96GB card: **88 tok/s** decode / ~2900 t/s prefill (pp4096); llama-bench
+tg128 90.05. (Was 74.9 before enabling graph reuse for qwen4exp - a port of
+canreuse-qwen4exp.patch from 0xBakeer/qwen38-flash-next-spark, thanks @0xBakeer.)
 Hardware for all numbers: 1x RTX PRO 6000 Blackwell Max-Q (300W) + 128GB DDR4 dual-channel.
 
 ## Qwen3.8-Flash-Next (125B-A6B + 51B n-gram PLE, unsloth UD-Q4_K_XL 111GB)
@@ -35,7 +37,7 @@ Hardware for all numbers: 1x RTX PRO 6000 Blackwell Max-Q (300W) + 128GB DDR4 du
 |---|---:|---:|---:|
 | `-ngl 99 --n-cpu-moe 10` | 65 GB | 43.8 tok/s | |
 | `-ngl 99 --n-cpu-moe 3` | 76 GB | 60.5 tok/s | |
-| **`-ngl 99` (all experts on GPU)** | **80 GB** | **74.9 tok/s** | **2210 tok/s** |
+| **`-ngl 99` (all experts on GPU)** | **80 GB** | **88.1 tok/s** (tg128 90.05) | **~2420 tok/s** |
 | VRAM capped to 32GB (64GB balloon) `--n-cpu-moe 36` | ~28 GB | 24.2 tok/s | 421 tok/s |
 | VRAM capped to 32GB, **`--cpu-moe --expert-hot-s 140`** (this fork) | ~31 GB | **32.9 tok/s** (converged, see note above) | 325 tok/s |
 
