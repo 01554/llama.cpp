@@ -5,7 +5,7 @@ on single-GPU machines with ordinary (dual-channel) RAM. Also carries
 [PR #27742](https://github.com/ggml-org/llama.cpp/pull/27742) (Qwen3.8-Flash-Next / qwen4exp)
 applied on top.
 
-Hardware for all numbers below: **1× RTX PRO 6000 Blackwell 96GB + 128GB DDR4** (dual channel).
+Hardware for all numbers below: **1x RTX PRO 6000 Blackwell Max-Q (300W) 96GB + 128GB DDR4** (dual channel). Note: the Max-Q edition runs ~20% slower than the 600W card; a full-power RTX PRO 6000 reports tg128 ~95 t/s on this model in the PR thread.
 
 ## Qwen3.8-Flash-Next (125B-A6B + 51B n-gram PLE, unsloth UD-Q4_K_XL 111GB)
 
