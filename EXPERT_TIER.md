@@ -1,11 +1,22 @@
-# expert-tier branch — MoE expert offload experiments + Qwen3.8-Flash-Next day-0
+# expert-tier — a llama.cpp fork for running huge MoE models on small VRAM
 
-Fork of llama.cpp exploring **expert-granularity VRAM/RAM placement** for huge MoE models
-on single-GPU machines with ordinary (dual-channel) RAM. Also carries
-[PR #27742](https://github.com/ggml-org/llama.cpp/pull/27742) (Qwen3.8-Flash-Next / qwen4exp)
-applied on top.
+**What this is**: upstream llama.cpp offloads MoE weights to CPU *per layer*. This fork
+adds **per-expert placement**: the few hundred experts a model actually fires most live in
+a VRAM hot cache (heat-tracked, migrating at a capped rate); everything else stays in
+ordinary host RAM. On models with skewed routing this beats layer-split offload by
+30-100% at the same VRAM budget. The branch also carries
+[PR #27742](https://github.com/ggml-org/llama.cpp/pull/27742) (Qwen3.8-Flash-Next).
 
-Hardware for all numbers below: **1x RTX PRO 6000 Blackwell Max-Q (300W) 96GB + 128GB DDR4** (dual channel). Note: the Max-Q edition runs ~20% slower than the 600W card; a full-power RTX PRO 6000 reports tg128 ~95 t/s on this model in the PR thread.
+**Headline result** — Qwen3.8-Flash-Next (176B total, unsloth UD-Q4_K_XL) with VRAM
+**capped to 32GB** (RTX 5090-sized) + 96GB host RAM:
+
+| 32GB-cap config | decode |
+|---|---:|
+| plain layer-split (`--n-cpu-moe 36`) | 24.2 tok/s |
+| **this fork, expert hot cache (`--expert-hot-s 140`)** | **32.9 tok/s (+36%)** |
+
+Uncapped on the full 96GB card: 74.9 tok/s decode / 2922 t/s prefill (pp4096).
+Hardware for all numbers: 1x RTX PRO 6000 Blackwell Max-Q (300W) + 128GB DDR4 dual-channel.
 
 ## Qwen3.8-Flash-Next (125B-A6B + 51B n-gram PLE, unsloth UD-Q4_K_XL 111GB)
 
