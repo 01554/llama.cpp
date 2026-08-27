@@ -18,6 +18,15 @@ ordinary host RAM. On models with skewed routing this beats layer-split offload 
 (Figures include the qwen4exp graph-reuse patch, which lifted both configs: baseline
 24.2 -> 25, hot cache 32.9 -> 35-36. Earlier figures in the history are pre-reuse.)
 
+**VRAM sweep** (same card ballooned to each size, UD-Q4_K_XL, converged decode):
+
+| VRAM budget | plain layer-split | this fork (hot cache) | gain |
+|---|---:|---:|---:|
+| 32 GB (5090-class) | 25 tok/s (`--n-cpu-moe 36`) | **35-36** (`-ehs 140`) | +42% |
+| 48 GB | 29 tok/s (`--n-cpu-moe 24`) | **~39** (`-ehs 260`) | +34% |
+| 96 GB (no cap) | 88 tok/s (`-ngl 99`, cache not needed) | - | - |
+
+
 Decode converges over ~10k generated tokens (cold start ~22 tok/s, then 25 -> 30 -> 33 as
 the cache adapts at 1 swap/token). The hot cache is a decode optimization: prefill batches
 touch nearly all 512 experts, so they bypass the cache and take the plain CPU-offload path -
