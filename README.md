@@ -1,3 +1,5 @@
+> **This fork (branch expert-tier)**: MoE expert-offload experiments + Qwen3.8-Flash-Next day-0 benchmarks - see [EXPERT_TIER.md](EXPERT_TIER.md). Not upstream llama.cpp.
+
 # llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
