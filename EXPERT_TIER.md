@@ -14,7 +14,8 @@ Hardware for all numbers below: **1x RTX PRO 6000 Blackwell Max-Q (300W) 96GB + 
 | `-ngl 99 --n-cpu-moe 10` | 65 GB | 43.8 tok/s | |
 | `-ngl 99 --n-cpu-moe 3` | 76 GB | 60.5 tok/s | |
 | **`-ngl 99` (all experts on GPU)** | **80 GB** | **74.9 tok/s** | **2210 tok/s** |
-| VRAM capped to 32GB (64GB balloon) `--n-cpu-moe 36` | ~28 GB | 24.2 tok/s | |
+| VRAM capped to 32GB (64GB balloon) `--n-cpu-moe 36` | ~28 GB | 24.2 tok/s |
+| VRAM capped to 32GB, **`--cpu-moe --expert-hot-s 140`** (this fork) | ~31 GB | **32.9 tok/s** | |
 
 - The 51B n-gram (PLE) table stays host-resident (~27GB) — its per-token cost is a few KB of
   row gathers, so "table in RAM" is effectively free. This is what makes the model fit.
