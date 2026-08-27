@@ -12,8 +12,11 @@ ordinary host RAM. On models with skewed routing this beats layer-split offload 
 
 | 32GB-cap config | decode | prefill (4k / 7k) |
 |---|---:|---:|
-| plain layer-split (`--n-cpu-moe 36`) | 24.2 tok/s | 421 / 416 t/s |
-| **this fork, expert hot cache (`--expert-hot-s 140`)** | **32.9 tok/s (+36%, converged)** | 325 / 320 t/s |
+| plain layer-split (`--n-cpu-moe 36`) | 25 tok/s | 421 / 416 t/s |
+| **this fork, expert hot cache (`--expert-hot-s 140`)** | **35-36 tok/s (+42%, converged)** | 325 / 320 t/s |
+
+(Figures include the qwen4exp graph-reuse patch, which lifted both configs: baseline
+24.2 -> 25, hot cache 32.9 -> 35-36. Earlier figures in the history are pre-reuse.)
 
 Decode converges over ~10k generated tokens (cold start ~22 tok/s, then 25 -> 30 -> 33 as
 the cache adapts at 1 swap/token). The hot cache is a decode optimization: prefill batches
