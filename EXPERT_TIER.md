@@ -57,9 +57,10 @@ keep more full layers on the GPU (`--n-cpu-moe`) if prefill matters for your wor
 > degenerate output. The corrected build converges to the same ~33 tok/s with sane output,
 > so the headline stands - but any hot-cache run before that commit was generating garbage.
 
-Uncapped on the full 96GB card: **88 tok/s** decode / ~2900 t/s prefill (pp4096); llama-bench
-tg128 90.05. (Was 74.9 before enabling graph reuse for qwen4exp - a port of
-canreuse-qwen4exp.patch from 0xBakeer/qwen38-flash-next-spark, thanks @0xBakeer.)
+Uncapped on the full 96GB card: llama-bench **tg128 92.7 / pp4096 3115** (branch now based
+on upstream master with PR #27742 merged, which adopted graph reuse for qwen4exp - the same
+optimization we briefly carried as a port of 0xBakeer's canreuse patch, thanks @0xBakeer).
+Server-side decode ~88 tok/s.
 Hardware for all numbers: 1x RTX PRO 6000 Blackwell Max-Q (300W) + 128GB DDR4 dual-channel.
 
 ## Qwen3.8-Flash-Next (125B-A6B + 51B n-gram PLE, unsloth UD-Q4_K_XL 111GB)
