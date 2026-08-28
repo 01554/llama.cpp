@@ -37,6 +37,14 @@ via mmap. IQ3_XXS beats IQ4_XS here: IQ4 experts (~62GB) do not fit a 50GB
 RAM budget and thrash to ~15 tok/s after long prompts, so at 50GB RAM use
 IQ3_XXS; IQ4_XS wants 64GB+.
 
+Honest caveat: at IQ3 the plain layer-split baseline (`--n-cpu-moe 24`) also
+reaches ~42 tok/s - 3-bit experts are small enough that layer offload stops
+hurting, so the hot cache buys nothing there. The cache pays off in the 4-bit
+tier: Q4_K_XL at a 32GB cap in llama-bench terms is tg4096 26.0 (layer-split)
+vs 36.1 (hot cache, +39%; `LLAMA_EHS_HOT_S=140 -ot exps=CPU`), matching the
+server-measured 25 -> 35. Pick your quant first, then decide if you need the
+cache.
+
 
 Decode converges over ~10k generated tokens (cold start ~22 tok/s, then 25 -> 30 -> 33 as
 the cache adapts at 1 swap/token). The hot cache is a decode optimization: prefill batches
