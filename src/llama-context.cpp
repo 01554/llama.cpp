@@ -467,6 +467,14 @@ llama_context::llama_context(
         }
     }
 
+    // env fallback so frontends without the CLI flag (llama-bench) can enable
+    // the expert hot store: LLAMA_EHS_HOT_S=<slots>
+    if (params.expert_hot_s == 0) {
+        if (const char * e = getenv("LLAMA_EHS_HOT_S")) {
+            params.expert_hot_s = atoi(e);
+        }
+    }
+
     if (hparams.n_expert > 0 && !cparams.warmup &&
         (params.expert_heat_log_period != 0 || params.expert_hot_s != 0)) {
         expert_heatmap = std::make_unique<llama_expert_heatmap>(
