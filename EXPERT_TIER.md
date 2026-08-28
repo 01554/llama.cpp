@@ -26,6 +26,13 @@ ordinary host RAM. On models with skewed routing this beats layer-split offload 
 | 48 GB | 29 tok/s (`--n-cpu-moe 24`) | **~39** (`-ehs 260`) | +34% |
 | 96 GB (no cap) | 88 tok/s (`-ngl 99`, cache not needed) | - | - |
 
+**Minimum-spec demo** - simulated RTX 5090 owner with a normal gaming rig
+(32GB VRAM cap + RAM hard-limited to 50GB via cgroup), UD-IQ3_XXS (82GB):
+`--cpu-moe --expert-hot-s 160` runs at **~40 tok/s decode** (converged; ~30
+cold), ~185 t/s prefill, using 40GB of RAM - the 27GB n-gram table stays on
+NVMe via mmap. IQ3_XXS beats the Q4 hot-cache figure at 32GB because smaller
+experts mean less RAM traffic per miss.
+
 
 Decode converges over ~10k generated tokens (cold start ~22 tok/s, then 25 -> 30 -> 33 as
 the cache adapts at 1 swap/token). The hot cache is a decode optimization: prefill batches
