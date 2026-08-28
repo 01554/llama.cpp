@@ -28,10 +28,14 @@ ordinary host RAM. On models with skewed routing this beats layer-split offload 
 
 **Minimum-spec demo** - simulated RTX 5090 owner with a normal gaming rig
 (32GB VRAM cap + RAM hard-limited to 50GB via cgroup), UD-IQ3_XXS (82GB):
-`--cpu-moe --expert-hot-s 160` runs at **~40 tok/s decode** (converged; ~30
-cold), ~185 t/s prefill, using 40GB of RAM - the 27GB n-gram table stays on
-NVMe via mmap. IQ3_XXS beats the Q4 hot-cache figure at 32GB because smaller
-experts mean less RAM traffic per miss.
+`--cpu-moe --expert-hot-s 260` runs at **~43 tok/s decode** (converged; ~34
+cold) with the hot store sized to actually use the card (24GB of the 32GB;
+260 of 512 experts resident). llama-bench figures for the same config
+(`LLAMA_EHS_HOT_S=260 llama-bench -ot exps=CPU -fa 1`): pp4096 230 t/s,
+tg128 37, tg4096 40. RAM stays around 40GB - the n-gram table lives on NVMe
+via mmap. IQ3_XXS beats IQ4_XS here: IQ4 experts (~62GB) do not fit a 50GB
+RAM budget and thrash to ~15 tok/s after long prompts, so at 50GB RAM use
+IQ3_XXS; IQ4_XS wants 64GB+.
 
 
 Decode converges over ~10k generated tokens (cold start ~22 tok/s, then 25 -> 30 -> 33 as
