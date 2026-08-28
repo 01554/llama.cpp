@@ -387,34 +387,6 @@ public:
         mctx->set_input_qsa(cell_blk, blk_cells, blk_pos, bias, ubatch, ratio);
     }
 
-    // Graph reuse (ported from 0xBakeer/qwen38-flash-next-spark): the base class
-    // vetoes reuse, forcing a full rebuild + re-split + galloc every token and
-    // keeping CUDA graph capture off its fast path. Everything per-token here is
-    // refilled by set_input, so only the shapes have to match. Re-bind mctx first:
-    // set_input writes through this pointer every token, and a stale context would
-    // fill inputs from the previous cache.
-    bool can_reuse(const llm_graph_params & params) override {
-        const auto * m = static_cast<const llama_memory_hybrid_idx_context *>(params.mctx);
-        mctx = m;
-
-        const int64_t n_tokens = params.ubatch.n_tokens;
-        const int64_t n_stream = m->get_n_stream();
-        if (ratio == 0 || n_stream == 0 || n_tokens % n_stream != 0) {
-            return false;
-        }
-        const int64_t n_kv     = m->get_idx()->get_n_kv();
-        const int64_t n_blocks = (n_kv + (int64_t) ratio - 1)/(int64_t) ratio;
-        const int64_t n_tps    = n_tokens/n_stream;
-
-        bool res = true;
-        res &= k_idxs    != nullptr && k_idxs->ne[0]    == n_tokens;
-        res &= cell_blk  != nullptr && cell_blk->ne[0]  == n_kv && cell_blk->ne[1] == n_stream;
-        res &= blk_cells != nullptr && blk_cells->ne[0] == (int64_t) ratio*n_blocks && blk_cells->ne[1] == n_stream;
-        res &= blk_pos   != nullptr && blk_pos->ne[0]   == 4*n_blocks*n_stream;
-        res &= bias      != nullptr && bias->ne[0] == n_kv && bias->ne[1] == n_tps && bias->ne[2] == n_stream;
-        return res;
-    }
-
     // per stream: a cell index names a different token in each stream
     ggml_tensor * k_idxs    = nullptr;   // I32 [n_tokens]
     ggml_tensor * cell_blk  = nullptr;   // I32 [n_kv, n_stream]
@@ -897,15 +869,6 @@ public:
     virtual ~llm_graph_input_ple() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
-
-    // set_input recomputes the n-gram hash for every token, so reuse is safe as
-    // long as the gather index tensor keeps its shape. The ple token history
-    // lives on the memory context, so re-bind mctx like the QSA input does.
-    bool can_reuse(const llm_graph_params & params) override {
-        mctx = static_cast<const llama_memory_hybrid_idx_context *>(params.mctx);
-        const int64_t n_heads = (int64_t) pmodel.hparams.ple_n_heads;
-        return rows != nullptr && rows->ne[0] == n_heads * (int64_t) params.ubatch.n_tokens;
-    }
 
     ggml_tensor * rows = nullptr;   // I32 [ple_n_heads * n_tokens]
 
