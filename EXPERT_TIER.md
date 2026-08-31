@@ -37,6 +37,12 @@ via mmap. IQ3_XXS beats IQ4_XS here: IQ4 experts (~62GB) do not fit a 50GB
 RAM budget and thrash to ~15 tok/s after long prompts, so at 50GB RAM use
 IQ3_XXS; IQ4_XS wants 64GB+.
 
+**Agentic quality A/B** (DeepSWE 1.1, 12 tasks, mini-swe-agent, temp 1.0): under an identical
+32GB cap + 131k context budget, the hot cache and plain layer-split solved the **same 3 of 12
+tasks** (the full 96GB card at 262k context solves 9/12 - the drop is entirely the context
+budget, not the cache: 7-8 of the failures in both capped arms died on context overflow).
+Same quality, but the cached arm finished the campaign in ~11h vs ~19h for layer-split.
+
 Honest caveat: at IQ3 the plain layer-split baseline (`--n-cpu-moe 24`) also
 reaches ~42 tok/s - 3-bit experts are small enough that layer offload stops
 hurting, so the hot cache buys nothing there. The cache pays off in the 4-bit
